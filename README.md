@@ -2,11 +2,14 @@
 
 Serveur MCP (Model Context Protocol) compatible avec Claude Web via HTTPS/Cloudflare.
 
-## ✅ Configuration Testée et Fonctionnelle
+## ✅ Configuration Testée et Fonctionnelle - VERSION CORRIGÉE
+
+⚠️ **BREAKING CHANGE v1.1** : Le wrapper a été corrigé pour respecter le protocole MCP standard. Les outils sont maintenant correctement exposés via `tools/list` au lieu d'être injectés incorrectement.
 
 Cette configuration a été **testée avec succès** avec Claude Web et fournit **9 outils filesystem** fonctionnels :
 - Connection MCP validée ✅
-- Injection automatique des outils ✅ 
+- Protocole MCP standard respecté ✅ 
+- Gestion des notifications corrigée ✅
 - Workspace sécurisé ✅
 - URL publique HTTPS ✅
 
@@ -14,7 +17,7 @@ Cette configuration a été **testée avec succès** avec Claude Web et fournit 
 
 ```
 mcp-claude-web-server/
-├── mcp-http-wrapper.js    # Wrapper HTTP Express qui gère les requêtes MCP
+├── mcp-http-wrapper.js    # Wrapper HTTP Express (CORRIGÉ - proxy simple)
 ├── package.json           # Dépendances Node.js
 ├── start-server.sh        # Script de démarrage automatique
 ├── README.md              # Cette documentation
@@ -83,7 +86,7 @@ Claude Web (HTTPS)
     ↓
 Cloudflare Tunnel (Public URL)
     ↓
-HTTP Wrapper (Port 3020)
+HTTP Wrapper (Port 3020) - SIMPLE PROXY
     ↓
 MCP Filesystem Server (STDIO)
     ↓
@@ -92,10 +95,15 @@ Workspace (/home/tyler/claude-workspace)
 
 ## 🛠️ Fonctionnalités
 
-### Enrichissement automatique
-Le wrapper enrichit automatiquement la réponse `initialize` avec les 9 outils filesystem disponibles, résolvant le problème de Claude Web qui attend les outils dès l'initialisation.
+### Protocole MCP Standard (CORRIGÉ)
+Le wrapper agit maintenant comme un **simple proxy HTTP ↔ STDIO** qui respecte totalement le protocole MCP :
 
-### Outils disponibles (9) - TESTÉS ✅
+1. **Initialize** : Claude Web → MCP Server (handshake standard)
+2. **Tools/List** : Claude Web → MCP Server (récupération des outils)
+3. **Notifications** : Gestion correcte sans attente de réponse
+4. **Tool Calls** : Proxy transparent des appels d'outils
+
+### Outils disponibles (9) - PROTOCOLE STANDARD ✅
 - **read_file** : Lecture complète d'un fichier
 - **read_multiple_files** : Lecture de plusieurs fichiers simultanément
 - **write_file** : Création/écrasement de fichiers
@@ -179,20 +187,34 @@ cloudflared tunnel --url http://localhost:3020
 ```
 
 ### Claude Web ne voit pas les outils
-- Supprimer et recréer le connecteur
+- ✅ **Problème résolu** : Le wrapper utilise maintenant le protocole MCP standard
+- Supprimer et recréer le connecteur si nécessaire
 - Vérifier que l'URL se termine par `/mcp`
 - Rafraîchir la page Claude Web
 
-## 🎯 Test de Validation
+## 🎯 Test de Validation v1.1
 
-La configuration a été testée avec succès :
+La configuration corrigée a été testée avec succès :
 ```
-📨 Claude Web → Tunnel HTTPS → Wrapper HTTP → MCP Server
-✅ Initialize: OK
-✅ Tools injection: 9 outils
-✅ Session management: OK
-✅ Filesystem access: OK
+📨 Claude Web → initialize → MCP Server ✅
+📤 MCP Server ← standard response ← 
+📨 Claude Web → tools/list → MCP Server ✅
+📤 MCP Server ← 9 tools response ← 
+📢 Notifications handled correctly ✅
 ```
+
+## 🔧 Changelog v1.1
+
+### BREAKING CHANGES
+- **Removed broken tool enrichment** that injected tools in wrong place
+- **Fixed MCP protocol compliance** - now uses standard handshake
+- **Proper notification handling** - no timeout on notifications
+
+### Improvements
+- ✅ Simple HTTP ↔ STDIO proxy respecting MCP protocol
+- ✅ Notifications handled without waiting for response
+- ✅ Tools properly exposed via `tools/list` request
+- ✅ Better error handling and logging
 
 ## 📚 Références
 
@@ -202,7 +224,7 @@ La configuration a été testée avec succès :
 
 ---
 
-**Version** : 1.0.0  
-**Status** : ✅ Production Ready  
+**Version** : 1.1.0 - PROTOCOL FIXED  
+**Status** : ✅ Production Ready - MCP Standard Compliant  
 **Auteur** : Tyler  
 **Licence** : MIT
