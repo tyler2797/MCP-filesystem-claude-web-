@@ -1,0 +1,22 @@
+{
+  "name": "mcp-claude-web-server",
+  "version": "1.0.0",
+  "description": "MCP Server for Claude Web with HTTPS support",
+  "main": "mcp-http-wrapper.js",
+  "type": "module",
+  "scripts": {
+    "start": "node mcp-http-wrapper.js",
+    "start-tunnel": "./start-server.sh",
+    "dev": "node mcp-http-wrapper.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "@modelcontextprotocol/server-filesystem": "^0.2.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "author": "Tyler",
+  "license": "MIT"
+}
