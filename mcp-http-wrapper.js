@@ -21,16 +21,56 @@ app.use(express.json());
 // Store active MCP server instances
 const mcpInstances = new Map();
 
-// MCP HTTP endpoint
+// Simple response handler
+function waitForResponse(instance, requestId, timeout = 10000) {
+  return new Promise((resolve, reject) => {
+    const startTime = Date.now();
+
+    const checkBuffer = () => {
+      // Look for complete JSON responses in buffer
+      const lines = instance.buffer.split('\n');
+
+      for (let i = 0; i < lines.length - 1; i++) {
+        const line = lines[i].trim();
+        if (!line) continue;
+
+        try {
+          const response = JSON.parse(line);
+          if (response.id === requestId) {
+            // Remove this line from buffer
+            instance.buffer = lines.slice(i + 1).join('\n');
+            return resolve(response);
+          }
+        } catch (e) {
+          // Skip invalid JSON lines
+        }
+      }
+
+      // Check timeout
+      if (Date.now() - startTime > timeout) {
+        return reject(new Error('MCP response timeout'));
+      }
+
+      // Continue checking
+      setTimeout(checkBuffer, 50);
+    };
+
+    checkBuffer();
+  });
+}
+
+// MCP HTTP endpoint - Simple proxy
 app.post('/mcp', async (req, res) => {
   try {
-    console.log('📨 Received MCP request:', JSON.stringify(req.body, null, 2));
-    
-    // For initialize requests, create new MCP server instance
-    if (req.body.method === 'initialize') {
-      const sessionId = randomUUID();
-      
-      // Start MCP server process (Anthropic official version)
+    console.log('📨 MCP Request:', JSON.stringify(req.body, null, 2));
+
+    const sessionId = req.headers['x-session-id'] || 'default-session';
+    let instance = mcpInstances.get(sessionId);
+
+    // Create new instance if needed
+    if (!instance) {
+      console.log(`🚀 Creating new MCP instance: ${sessionId}`);
+
       const mcpServer = spawn('npx', [
         '-y',
         '@modelcontextprotocol/server-filesystem',
@@ -38,205 +78,62 @@ app.post('/mcp', async (req, res) => {
       ], {
         stdio: ['pipe', 'pipe', 'pipe']
       });
-      
-      // Store the instance
-      mcpInstances.set(sessionId, {
+
+      instance = {
         process: mcpServer,
-        requests: new Map()
-      });
-      
-      console.log(`🚀 Created MCP instance: ${sessionId}`);
-      
-      // Set up process handlers
+        buffer: ''
+      };
+
+      // Capture stdout
       mcpServer.stdout.on('data', (data) => {
-        try {
-          const lines = data.toString().split('\n').filter(line => line.trim());
-          
-          for (const line of lines) {
-            if (!line.trim()) continue;
-            
-            try {
-              const response = JSON.parse(line);
-              const instance = mcpInstances.get(sessionId);
-              
-              console.log(`📤 MCP Response for session ${sessionId}:`, JSON.stringify(response, null, 2));
-              
-              if (response.id !== undefined && instance) {
-                // Store response for matching with HTTP request
-                instance.requests.set(response.id, response);
-                
-                // If this is an initialize response, enrich it with tools
-                if (response.result && response.result.capabilities) {
-                  console.log('🔧 Enriching initialize response with tools list...');
-                  
-                  // Auto-trigger tools/list to get available tools
-                  const toolsRequest = {
-                    jsonrpc: "2.0",
-                    id: "tools-" + randomUUID(),
-                    method: "tools/list"
-                  };
-                  
-                  mcpServer.stdin.write(JSON.stringify(toolsRequest) + '\n');
-                }
-              }
-            } catch (parseError) {
-              console.log('🔴 MCP Error:', line);
-            }
-          }
-        } catch (error) {
-          console.error('❌ Error processing MCP output:', error);
-        }
+        instance.buffer += data.toString();
       });
-      
+
       mcpServer.stderr.on('data', (data) => {
         console.error('🔴 MCP stderr:', data.toString());
       });
-      
+
       mcpServer.on('close', (code) => {
         console.log(`🔚 MCP process ${sessionId} closed with code ${code}`);
         mcpInstances.delete(sessionId);
       });
-      
-      // Store request and send to MCP server
-      const instance = mcpInstances.get(sessionId);
-      instance.requests.set(req.body.id, null); // Mark as pending
-      
-      mcpServer.stdin.write(JSON.stringify(req.body) + '\n');
-      
-      // Wait for response
-      const waitForResponse = () => {
-        return new Promise((resolve, reject) => {
-          const checkResponse = () => {
-            const response = instance.requests.get(req.body.id);
-            if (response !== null && response !== undefined) {
-              // Check if we need to inject tools into capabilities
-              if (response.result && response.result.capabilities && !response.result.tools) {
-                // Wait a bit for tools/list response
-                setTimeout(() => {
-                  // Look for tools response
-                  let toolsResponse = null;
-                  for (const [id, resp] of instance.requests.entries()) {
-                    if (id.startsWith('tools-') && resp && resp.result && resp.result.tools) {
-                      toolsResponse = resp;
-                      break;
-                    }
-                  }
-                  
-                  if (toolsResponse) {
-                    console.log(`✅ Injected ${toolsResponse.result.tools.length} tools into capabilities`);
-                    response.result.capabilities.tools = {};
-                    response.result.tools = toolsResponse.result.tools;
-                  }
-                  
-                  console.log('✅ Sending response for request ID:', req.body.id);
-                  resolve(response);
-                }, 500);
-              } else {
-                resolve(response);
-              }
-            } else {
-              setTimeout(checkResponse, 100);
-            }
-          };
-          checkResponse();
-          
-          // Timeout after 10 seconds
-          setTimeout(() => {
-            reject(new Error('Timeout waiting for MCP response'));
-          }, 10000);
-        });
-      };
-      
-      try {
-        const response = await waitForResponse();
-        res.json(response);
-      } catch (error) {
-        console.error('❌ Error waiting for MCP response:', error);
-        res.status(500).json({ error: 'MCP server timeout' });
-      }
-      
-    } else {
-      // For non-initialize requests, find existing session or use most recent
-      let targetSession = null;
-      
-      // Try to find session by some heuristic (use most recent for now)
-      if (mcpInstances.size > 0) {
-        targetSession = Array.from(mcpInstances.keys())[mcpInstances.size - 1];
-        console.log(`🔄 Using most recent session: ${targetSession} for request: ${req.body.method}`);
-      } else {
-        console.error('❌ No active MCP sessions found');
-        return res.status(500).json({ error: 'No active MCP session' });
-      }
-      
-      const instance = mcpInstances.get(targetSession);
-      if (!instance) {
-        return res.status(500).json({ error: 'Session not found' });
-      }
-      
-      // For notifications, just forward them
-      if (req.body.method && req.body.method.startsWith('notifications/')) {
-        console.log(`📢 Sending notification: ${req.body.method}`);
-        instance.process.stdin.write(JSON.stringify(req.body) + '\n');
-        
-        // Auto-trigger tools/list after initialization
-        if (req.body.method === 'notifications/initialized') {
-          console.log('🔧 Auto-triggering tools/list after initialization');
-          const toolsRequest = {
-            jsonrpc: "2.0",
-            id: "auto-tools-list",
-            method: "tools/list"
-          };
-          instance.process.stdin.write(JSON.stringify(toolsRequest) + '\n');
-        }
-        
-        return res.json({ success: true });
-      }
-      
-      // For regular requests, wait for response
-      const requestId = req.body.id || randomUUID();
-      const requestWithId = { ...req.body, id: requestId };
-      
-      instance.requests.set(requestId, null); // Mark as pending
-      instance.process.stdin.write(JSON.stringify(requestWithId) + '\n');
-      
-      // Wait for response
-      const waitForResponse = () => {
-        return new Promise((resolve, reject) => {
-          const checkResponse = () => {
-            const response = instance.requests.get(requestId);
-            if (response !== null && response !== undefined) {
-              resolve(response);
-            } else {
-              setTimeout(checkResponse, 100);
-            }
-          };
-          checkResponse();
-          
-          setTimeout(() => {
-            reject(new Error('Timeout waiting for MCP response'));
-          }, 10000);
-        });
-      };
-      
-      try {
-        const response = await waitForResponse();
-        res.json(response);
-      } catch (error) {
-        console.error('❌ Error waiting for MCP response:', error);
-        res.status(500).json({ error: 'MCP server timeout' });
-      }
+
+      mcpInstances.set(sessionId, instance);
     }
-    
+
+    // Forward request to MCP server
+    const requestData = JSON.stringify(req.body) + '\n';
+    instance.process.stdin.write(requestData);
+
+    // Handle notifications (no response expected)
+    if (req.body.method && req.body.method.startsWith('notifications/')) {
+      console.log('📢 Notification sent, no response expected');
+      return res.json({ success: true });
+    }
+
+    // Wait for response for regular requests
+    const response = await waitForResponse(instance, req.body.id);
+
+    console.log('📤 MCP Response:', JSON.stringify(response, null, 2));
+    res.json(response);
+
   } catch (error) {
-    console.error('❌ MCP request error:', error);
-    res.status(500).json({ error: error.message });
+    console.error('❌ MCP error:', error);
+    res.status(500).json({
+      jsonrpc: "2.0",
+      id: req.body.id || null,
+      error: {
+        code: -32603,
+        message: error.message
+      }
+    });
   }
 });
 
 // Health check endpoint
 app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'healthy', 
+  res.json({
+    status: 'healthy',
     activeSessions: mcpInstances.size,
     timestamp: new Date().toISOString()
   });
@@ -252,7 +149,7 @@ process.on('SIGINT', () => {
 });
 
 app.listen(PORT, '127.0.0.1', () => {
-  console.log(`🚀 MCP HTTP Wrapper running on http://127.0.0.1:${PORT}/mcp`);
+  console.log(`🚀 MCP HTTP Wrapper (FIXED) running on http://127.0.0.1:${PORT}/mcp`);
   console.log(`📊 Health check: http://127.0.0.1:${PORT}/health`);
   console.log(`🏠 MCP Workspace: /home/tyler/claude-workspace`);
 });
