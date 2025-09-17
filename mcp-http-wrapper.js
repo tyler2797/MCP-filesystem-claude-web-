@@ -49,201 +49,210 @@ app.post('/mcp', async (req, res) => {
       
       // Set up process handlers
       mcpServer.stdout.on('data', (data) => {
-        const responses = data.toString().split('\n').filter(line => line.trim());
-        responses.forEach(async response => {
-          if (!response.trim()) return;
-
-          try {
-            const parsed = JSON.parse(response);
-            console.log(`📤 MCP Response for session ${sessionId}:`, JSON.stringify(parsed, null, 2));
-            const instance = mcpInstances.get(sessionId);
-
-            // Special handling for initialize response
-            if (instance && instance.requests.has(parsed.id)) {
-              const { req: originalReq, res: originalRes } = instance.requests.get(parsed.id);
-
-              // If this is an initialize response, enrich with tools
-              if (originalReq.body.method === 'initialize' && parsed.result && parsed.result.capabilities) {
-                console.log('🔧 Enriching initialize response with tools list...');
-
-                // Create tools/list request
-                const toolsRequest = {
-                  jsonrpc: '2.0',
-                  id: `tools-${randomUUID()}`,
-                  method: 'tools/list',
-                  params: {}
-                };
-
-                // Create a promise to wait for tools response
-                const toolsPromise = new Promise((resolve) => {
-                  const toolsHandler = (toolsData) => {
-                    const toolsResponses = toolsData.toString().split('\n').filter(line => line.trim());
-                    for (const toolsResp of toolsResponses) {
-                      if (!toolsResp.trim()) continue;
-                      try {
-                        const toolsParsed = JSON.parse(toolsResp);
-                        if (toolsParsed.id === toolsRequest.id && toolsParsed.result && toolsParsed.result.tools) {
-                          // Convert array of tools to object indexed by name
-                          const toolsMap = {};
-                          for (const tool of toolsParsed.result.tools) {
-                            const { name, ...metadata } = tool;
-                            toolsMap[name] = metadata;
-                          }
-                          resolve(toolsMap);
-                          mcpServer.stdout.removeListener('data', toolsHandler);
-                          return;
-                        }
-                      } catch (e) {
-                        // Ignore parse errors
-                      }
-                    }
+        try {
+          const lines = data.toString().split('\n').filter(line => line.trim());
+          
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            
+            try {
+              const response = JSON.parse(line);
+              const instance = mcpInstances.get(sessionId);
+              
+              console.log(`📤 MCP Response for session ${sessionId}:`, JSON.stringify(response, null, 2));
+              
+              if (response.id !== undefined && instance) {
+                // Store response for matching with HTTP request
+                instance.requests.set(response.id, response);
+                
+                // If this is an initialize response, enrich it with tools
+                if (response.result && response.result.capabilities) {
+                  console.log('🔧 Enriching initialize response with tools list...');
+                  
+                  // Auto-trigger tools/list to get available tools
+                  const toolsRequest = {
+                    jsonrpc: "2.0",
+                    id: "tools-" + randomUUID(),
+                    method: "tools/list"
                   };
-                  mcpServer.stdout.on('data', toolsHandler);
-
-                  // Send tools/list request
+                  
                   mcpServer.stdin.write(JSON.stringify(toolsRequest) + '\n');
-
-                  // Timeout after 2 seconds
-                  setTimeout(() => {
-                    mcpServer.stdout.removeListener('data', toolsHandler);
-                    resolve({});
-                  }, 2000);
-                });
-
-                // Wait for tools and inject them
-                const toolsMap = await toolsPromise;
-                if (Object.keys(toolsMap).length > 0) {
-                  parsed.result.capabilities.tools = toolsMap;
-                  console.log(`✅ Injected ${Object.keys(toolsMap).length} tools into capabilities`);
                 }
               }
-
-              console.log(`✅ Sending response for request ID: ${parsed.id}`);
-              originalRes.json(parsed);
-              instance.requests.delete(parsed.id);
-            } else {
-              console.log(`⚠️ No matching request found for response ID: ${parsed.id}`);
+            } catch (parseError) {
+              console.log('🔴 MCP Error:', line);
             }
-          } catch (e) {
-            console.log('📄 MCP output:', response);
           }
-        });
+        } catch (error) {
+          console.error('❌ Error processing MCP output:', error);
+        }
       });
       
       mcpServer.stderr.on('data', (data) => {
-        console.log('🔴 MCP Error:', data.toString());
+        console.error('🔴 MCP stderr:', data.toString());
       });
       
-      mcpServer.on('close', () => {
-        console.log(`🔚 MCP instance ${sessionId} closed`);
+      mcpServer.on('close', (code) => {
+        console.log(`🔚 MCP process ${sessionId} closed with code ${code}`);
         mcpInstances.delete(sessionId);
       });
       
-      // Store this request with both req and res
+      // Store request and send to MCP server
       const instance = mcpInstances.get(sessionId);
-      instance.requests.set(req.body.id, { req: { body: req.body }, res });
+      instance.requests.set(req.body.id, null); // Mark as pending
       
-      // Send request to MCP server
       mcpServer.stdin.write(JSON.stringify(req.body) + '\n');
       
-      // Set session header for client
-      res.setHeader('X-Session-Id', sessionId);
+      // Wait for response
+      const waitForResponse = () => {
+        return new Promise((resolve, reject) => {
+          const checkResponse = () => {
+            const response = instance.requests.get(req.body.id);
+            if (response !== null && response !== undefined) {
+              // Check if we need to inject tools into capabilities
+              if (response.result && response.result.capabilities && !response.result.tools) {
+                // Wait a bit for tools/list response
+                setTimeout(() => {
+                  // Look for tools response
+                  let toolsResponse = null;
+                  for (const [id, resp] of instance.requests.entries()) {
+                    if (id.startsWith('tools-') && resp && resp.result && resp.result.tools) {
+                      toolsResponse = resp;
+                      break;
+                    }
+                  }
+                  
+                  if (toolsResponse) {
+                    console.log(`✅ Injected ${toolsResponse.result.tools.length} tools into capabilities`);
+                    response.result.capabilities.tools = {};
+                    response.result.tools = toolsResponse.result.tools;
+                  }
+                  
+                  console.log('✅ Sending response for request ID:', req.body.id);
+                  resolve(response);
+                }, 500);
+              } else {
+                resolve(response);
+              }
+            } else {
+              setTimeout(checkResponse, 100);
+            }
+          };
+          checkResponse();
+          
+          // Timeout after 10 seconds
+          setTimeout(() => {
+            reject(new Error('Timeout waiting for MCP response'));
+          }, 10000);
+        });
+      };
+      
+      try {
+        const response = await waitForResponse();
+        res.json(response);
+      } catch (error) {
+        console.error('❌ Error waiting for MCP response:', error);
+        res.status(500).json({ error: 'MCP server timeout' });
+      }
       
     } else {
-      // For non-initialize requests, use existing session
-      let sessionId = req.headers['x-session-id'];
-      let instance = mcpInstances.get(sessionId);
+      // For non-initialize requests, find existing session or use most recent
+      let targetSession = null;
       
-      // If no session provided or session not found, use the most recent session
-      if (!instance && mcpInstances.size > 0) {
-        const sessions = Array.from(mcpInstances.keys());
-        sessionId = sessions[sessions.length - 1]; // Get most recent session
-        instance = mcpInstances.get(sessionId);
-        console.log(`🔄 Using most recent session: ${sessionId} for request: ${req.body.method}`);
+      // Try to find session by some heuristic (use most recent for now)
+      if (mcpInstances.size > 0) {
+        targetSession = Array.from(mcpInstances.keys())[mcpInstances.size - 1];
+        console.log(`🔄 Using most recent session: ${targetSession} for request: ${req.body.method}`);
+      } else {
+        console.error('❌ No active MCP sessions found');
+        return res.status(500).json({ error: 'No active MCP session' });
       }
       
+      const instance = mcpInstances.get(targetSession);
       if (!instance) {
-        return res.status(404).json({
-          jsonrpc: '2.0',
-          error: { code: -32004, message: 'Session not found' },
-          id: req.body.id
-        });
+        return res.status(500).json({ error: 'Session not found' });
       }
       
-      // Handle notifications (no response expected)
+      // For notifications, just forward them
       if (req.body.method && req.body.method.startsWith('notifications/')) {
         console.log(`📢 Sending notification: ${req.body.method}`);
         instance.process.stdin.write(JSON.stringify(req.body) + '\n');
         
-        // After notifications/initialized, proactively send tools/list to populate Claude Web UI
+        // Auto-trigger tools/list after initialization
         if (req.body.method === 'notifications/initialized') {
-          console.log(`🔧 Auto-triggering tools/list after initialization`);
-          setTimeout(() => {
-            const toolsListRequest = {
-              jsonrpc: '2.0',
-              id: 'auto-tools-list',
-              method: 'tools/list',
-              params: {}
-            };
-            instance.process.stdin.write(JSON.stringify(toolsListRequest) + '\n');
-          }, 100); // Small delay to ensure notification is processed
+          console.log('🔧 Auto-triggering tools/list after initialization');
+          const toolsRequest = {
+            jsonrpc: "2.0",
+            id: "auto-tools-list",
+            method: "tools/list"
+          };
+          instance.process.stdin.write(JSON.stringify(toolsRequest) + '\n');
         }
         
-        // Notifications don't expect responses
-        res.status(200).json({ jsonrpc: '2.0' });
-        return;
+        return res.json({ success: true });
       }
       
-      // Store this request for methods that expect responses
-      if (req.body.id !== undefined) {
-        instance.requests.set(req.body.id, { req, res });
-      }
+      // For regular requests, wait for response
+      const requestId = req.body.id || randomUUID();
+      const requestWithId = { ...req.body, id: requestId };
       
-      // Send request to MCP server
-      instance.process.stdin.write(JSON.stringify(req.body) + '\n');
+      instance.requests.set(requestId, null); // Mark as pending
+      instance.process.stdin.write(JSON.stringify(requestWithId) + '\n');
+      
+      // Wait for response
+      const waitForResponse = () => {
+        return new Promise((resolve, reject) => {
+          const checkResponse = () => {
+            const response = instance.requests.get(requestId);
+            if (response !== null && response !== undefined) {
+              resolve(response);
+            } else {
+              setTimeout(checkResponse, 100);
+            }
+          };
+          checkResponse();
+          
+          setTimeout(() => {
+            reject(new Error('Timeout waiting for MCP response'));
+          }, 10000);
+        });
+      };
+      
+      try {
+        const response = await waitForResponse();
+        res.json(response);
+      } catch (error) {
+        console.error('❌ Error waiting for MCP response:', error);
+        res.status(500).json({ error: 'MCP server timeout' });
+      }
     }
     
-    // Response will be handled asynchronously by stdout handler
-    
   } catch (error) {
-    console.error('❌ Error handling MCP request:', error);
-    res.status(500).json({
-      jsonrpc: '2.0',
-      error: { code: -32603, message: 'Internal server error' },
-      id: req.body.id || null
-    });
+    console.error('❌ MCP request error:', error);
+    res.status(500).json({ error: error.message });
   }
 });
 
 // Health check endpoint
 app.get('/health', (req, res) => {
   res.json({ 
-    status: 'ok', 
+    status: 'healthy', 
     activeSessions: mcpInstances.size,
     timestamp: new Date().toISOString()
   });
 });
 
-// Start server
+// Cleanup on exit
+process.on('SIGINT', () => {
+  console.log('🔚 Shutting down MCP instances...');
+  for (const [sessionId, instance] of mcpInstances) {
+    instance.process.kill();
+  }
+  process.exit(0);
+});
+
 app.listen(PORT, '127.0.0.1', () => {
   console.log(`🚀 MCP HTTP Wrapper running on http://127.0.0.1:${PORT}/mcp`);
   console.log(`📊 Health check: http://127.0.0.1:${PORT}/health`);
   console.log(`🏠 MCP Workspace: /home/tyler/claude-workspace`);
-});
-
-// Graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('🔚 Shutting down MCP instances...');
-  mcpInstances.forEach((instance, sessionId) => {
-    instance.process.kill();
-  });
-  process.exit(0);
-});
-
-process.on('SIGINT', () => {
-  console.log('🔚 Shutting down MCP instances...');
-  mcpInstances.forEach((instance, sessionId) => {
-    instance.process.kill();
-  });
-  process.exit(0);
 });
