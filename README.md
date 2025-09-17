@@ -2,6 +2,14 @@
 
 Serveur MCP (Model Context Protocol) compatible avec Claude Web via HTTPS/Cloudflare.
 
+## ✅ Configuration Testée et Fonctionnelle
+
+Cette configuration a été **testée avec succès** avec Claude Web et fournit **9 outils filesystem** fonctionnels :
+- Connection MCP validée ✅
+- Injection automatique des outils ✅ 
+- Workspace sécurisé ✅
+- URL publique HTTPS ✅
+
 ## 📁 Structure du dossier
 
 ```
@@ -85,14 +93,18 @@ Workspace (/home/tyler/claude-workspace)
 ## 🛠️ Fonctionnalités
 
 ### Enrichissement automatique
-Le wrapper enrichit automatiquement la réponse `initialize` avec les 14 outils filesystem disponibles, résolvant le problème de Claude Web qui attend les outils dès l'initialisation.
+Le wrapper enrichit automatiquement la réponse `initialize` avec les 9 outils filesystem disponibles, résolvant le problème de Claude Web qui attend les outils dès l'initialisation.
 
-### Outils disponibles (14)
-- **Lecture** : `read_text_file`, `read_media_file`, `read_multiple_files`
-- **Écriture** : `write_file`, `edit_file`
-- **Répertoires** : `create_directory`, `list_directory`, `directory_tree`
-- **Opérations** : `move_file`, `search_files`, `get_file_info`
-- **Sécurité** : `list_allowed_directories`
+### Outils disponibles (9) - TESTÉS ✅
+- **read_file** : Lecture complète d'un fichier
+- **read_multiple_files** : Lecture de plusieurs fichiers simultanément
+- **write_file** : Création/écrasement de fichiers
+- **create_directory** : Création de répertoires
+- **list_directory** : Liste détaillée des fichiers/dossiers
+- **move_file** : Déplacement/renommage de fichiers
+- **search_files** : Recherche de fichiers par pattern
+- **get_file_info** : Métadonnées détaillées des fichiers
+- **list_allowed_directories** : Liste des répertoires autorisés
 
 ### Workspace sécurisé
 - **Chemin** : `/home/tyler/claude-workspace/`
@@ -171,6 +183,17 @@ cloudflared tunnel --url http://localhost:3020
 - Vérifier que l'URL se termine par `/mcp`
 - Rafraîchir la page Claude Web
 
+## 🎯 Test de Validation
+
+La configuration a été testée avec succès :
+```
+📨 Claude Web → Tunnel HTTPS → Wrapper HTTP → MCP Server
+✅ Initialize: OK
+✅ Tools injection: 9 outils
+✅ Session management: OK
+✅ Filesystem access: OK
+```
+
 ## 📚 Références
 
 - [Model Context Protocol](https://github.com/anthropics/model-context-protocol)
@@ -179,6 +202,7 @@ cloudflared tunnel --url http://localhost:3020
 
 ---
 
-**Version** : 1.0.0
-**Auteur** : Tyler
+**Version** : 1.0.0  
+**Status** : ✅ Production Ready  
+**Auteur** : Tyler  
 **Licence** : MIT
